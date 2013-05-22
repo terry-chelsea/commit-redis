@@ -44,17 +44,20 @@ void zlibc_free(void *ptr) {
 #include "config.h"
 #include "zmalloc.h"
 
+//对于非C内存分配器，不进行内存分配的统计信息的记录 
 #ifdef HAVE_MALLOC_SIZE
 #define PREFIX_SIZE (0)
 #else
 #if defined(__sun) || defined(__sparc) || defined(__sparc__)
 #define PREFIX_SIZE (sizeof(long long))
 #else
+//在一般的机器上，使用size_t记录分配内存的大小，每一个内存段都附带该字段
 #define PREFIX_SIZE (sizeof(size_t))
 #endif
 #endif
 
 /* Explicitly override malloc/free etc when using tcmalloc. */
+//重载malloc函数，这里暂不考虑
 #if defined(USE_TCMALLOC)
 #define malloc(size) tc_malloc(size)
 #define calloc(count,size) tc_calloc(count,size)
@@ -67,6 +70,8 @@ void zlibc_free(void *ptr) {
 #define free(ptr) je_free(ptr)
 #endif
 
+//如果编译器（gcc的一些版本）支持atomic操作，直接使用原子操作更新这个全局变量
+//否则使用显示加锁的方式更新该变量
 #ifdef HAVE_ATOMIC
 #define update_zmalloc_stat_add(__n) __sync_add_and_fetch(&used_memory, (__n))
 #define update_zmalloc_stat_sub(__n) __sync_sub_and_fetch(&used_memory, (__n))
@@ -85,6 +90,7 @@ void zlibc_free(void *ptr) {
 
 #endif
 
+//在真正统计的时候以sizeof(long)字节对齐的
 #define update_zmalloc_stat_alloc(__n) do { \
     size_t _n = (__n); \
     if (_n&(sizeof(long)-1)) _n += sizeof(long)-(_n&(sizeof(long)-1)); \
@@ -109,6 +115,7 @@ static size_t used_memory = 0;
 static int zmalloc_thread_safe = 0;
 pthread_mutex_t used_memory_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+//默认的分配失败的回调函数，abort
 static void zmalloc_default_oom(size_t size) {
     fprintf(stderr, "zmalloc: Out of memory trying to allocate %zu bytes\n",
         size);
@@ -119,6 +126,7 @@ static void zmalloc_default_oom(size_t size) {
 static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 
 void *zmalloc(size_t size) {
+    //多分配PREFIX_SIZE 字节的内存
     void *ptr = malloc(size+PREFIX_SIZE);
 
     if (!ptr) zmalloc_oom_handler(size);
@@ -126,7 +134,9 @@ void *zmalloc(size_t size) {
     update_zmalloc_stat_alloc(zmalloc_size(ptr));
     return ptr;
 #else
+    //多分配的字节中保存本次分配的真正内存大小
     *((size_t*)ptr) = size;
+    //更新分配的统计信息
     update_zmalloc_stat_alloc(size+PREFIX_SIZE);
     return (char*)ptr+PREFIX_SIZE;
 #endif
@@ -202,6 +212,7 @@ void zfree(void *ptr) {
 #else
     realptr = (char*)ptr-PREFIX_SIZE;
     oldsize = *((size_t*)realptr);
+    //释放的时候统计也包括实际分配的加上PREFIX_SIZE
     update_zmalloc_stat_free(oldsize+PREFIX_SIZE);
     free(realptr);
 #endif
@@ -234,10 +245,12 @@ size_t zmalloc_used_memory(void) {
     return um;
 }
 
+//多线程内存分配器安全的标记，根据配置文件设置
 void zmalloc_enable_thread_safeness(void) {
     zmalloc_thread_safe = 1;
 }
 
+//设置分配失败时候的回调函数
 void zmalloc_set_oom_handler(void (*oom_handler)(size_t)) {
     zmalloc_oom_handler = oom_handler;
 }
@@ -285,10 +298,40 @@ size_t zmalloc_get_rss(void) {
     if (!x) return 0;
     *x = '\0';
 
+    //将proc中该文件的低24项的数字转换成long，最后一个参数是以10为base
+    //这里的字符串是从p->x这段字符串
     rss = strtoll(p,NULL,10);
+    //proc文件中显示的是以页大小为单位的
     rss *= page;
     return rss;
 }
+
+//顺便补充一下知识：在/proc/pid/stat文件显示了该进程当前的状态，其中重要的项有：
+//1、进程pid
+//2、应用程序名
+//3、当前进程状态（R-running ， S-sleeping(INTERRUPT) , D-deep sleep(UNINTERRUPT) , T-stopped , T-tracing stop , Z-zombie）
+//4、ppid
+//5、pgid
+//7、tty的终端设备号
+//10、该进程不需要从硬盘拷贝数据而发生的缺页次数（次缺页）
+//12、该进程需要从硬盘拷贝数据而发生的缺页的次数（主缺页）
+//14、该进程在用户态运行的时间，单位是系统的时钟中断周期
+//15、该进程在内核态运行的时间，单位同上
+//18、进程的动态优先级
+//19、进程的动态优先级
+//20、进程的线程组中线程个数
+//22、该进程从启动以来运行的时间，以时钟中断周期为单位
+//23、虚拟地址空间的大小，以页为单位
+//24、rss，当前进程驻留物理内存的空间大小
+//25、该进程能够驻留物理内存大小的最大值
+//26、该进程代码段的度虚拟地址的起始地址
+//27、该进程代码段的结束地址
+//28、该进程栈的结束地址
+//29、堆栈的当前值（esp指针）
+//30、eip的值（执行的指令）
+//31、32、32、待处理的信号。阻塞的信号和忽略的信号位图
+//最后一项、进程的调度策略（0-非实时进程、1-FIFO实时进程，2-RR实时进程）
+
 #elif defined(HAVE_TASKINFO)
 #include <unistd.h>
 #include <stdio.h>
@@ -298,6 +341,7 @@ size_t zmalloc_get_rss(void) {
 #include <mach/task.h>
 #include <mach/mach_init.h>
 
+//获取实际使用的内存大小 
 size_t zmalloc_get_rss(void) {
     task_t task = MACH_PORT_NULL;
     struct task_basic_info t_info;
