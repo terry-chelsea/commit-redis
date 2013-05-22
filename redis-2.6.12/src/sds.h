@@ -37,29 +37,39 @@
 #include <stdarg.h>
 
 typedef char *sds;
+//sds字符串的首地址紧跟着一个sdshdr对象之后，首地址就是buf
 
 struct sdshdr {
-    int len;
-    int free;
-    char buf[];
+    int len;      //数组的总长度
+    int free;     //数组当前空闲的首字节的下标
+    char buf[];   //动态数组
 };
 
+//内联函数，字符串的当前使用的长度
 static inline size_t sdslen(const sds s) {
     struct sdshdr *sh = (void*)(s-(sizeof(struct sdshdr)));
     return sh->len;
 }
 
+//内联，可用空间
 static inline size_t sdsavail(const sds s) {
     struct sdshdr *sh = (void*)(s-(sizeof(struct sdshdr)));
     return sh->free;
 }
 
+//根据一段内存初始化一个sds
 sds sdsnewlen(const void *init, size_t initlen);
+//根据一段字符串初始化一个sds
 sds sdsnew(const char *init);
+//初始化一个空的字符串
 sds sdsempty();
+//字符串长度，不用遍历字符串
 size_t sdslen(const sds s);
+//复制一个字符串
 sds sdsdup(const sds s);
+//删除一个字符串
 void sdsfree(sds s);
+//可用空间
 size_t sdsavail(const sds s);
 sds sdsgrowzero(sds s, size_t len);
 sds sdscatlen(sds s, const void *t, size_t len);

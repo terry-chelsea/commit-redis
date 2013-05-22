@@ -39,6 +39,7 @@
 sds sdsnewlen(const void *init, size_t initlen) {
     struct sdshdr *sh;
 
+    //每次分配一个sdshdr对象和对应的长度，多一个字符保存'\0'
     if (init) {
         sh = zmalloc(sizeof(struct sdshdr)+initlen+1);
     } else {
@@ -50,6 +51,7 @@ sds sdsnewlen(const void *init, size_t initlen) {
     if (initlen && init)
         memcpy(sh->buf, init, initlen);
     sh->buf[initlen] = '\0';
+    //使用的是真正的字符串，但是hdr信息保存在前面的sizeof(sdshdr)字节处
     return (char*)sh->buf;
 }
 
@@ -71,6 +73,7 @@ void sdsfree(sds s) {
     zfree(s-sizeof(struct sdshdr));
 }
 
+//根据当前字符串的长度更新hdr的信息
 void sdsupdatelen(sds s) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
     int reallen = strlen(s);
@@ -78,6 +81,7 @@ void sdsupdatelen(sds s) {
     sh->len = reallen;
 }
 
+//清除该字符串的内容，但是不删除
 void sdsclear(sds s) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
     sh->free += sh->len;
@@ -91,22 +95,30 @@ void sdsclear(sds s) {
  * 
  * Note: this does not change the *size* of the sds string as returned
  * by sdslen(), but only the free buffer space we have. */
+//在sds空间增长addlen字节的长度，增长之后的字符串的空闲字节数大于addlen
 sds sdsMakeRoomFor(sds s, size_t addlen) {
     struct sdshdr *sh, *newsh;
     size_t free = sdsavail(s);
     size_t len, newlen;
 
+    //如果当前空闲的空间已经满足了条件，不需要增长
     if (free >= addlen) return s;
+    //有效长度保持不变
     len = sdslen(s);
     sh = (void*) (s-(sizeof(struct sdshdr)));
+    //增长之后的字符串长度
     newlen = (len+addlen);
+    //如果扩展之后的字符串长度如果小于1M，增倍分配
     if (newlen < SDS_MAX_PREALLOC)
         newlen *= 2;
     else
+        //分配之后的字符串长于1M，每次只增加1M
         newlen += SDS_MAX_PREALLOC;
+    //重新分配字符串，长度至少为addlen
     newsh = zrealloc(sh, sizeof(struct sdshdr)+newlen+1);
     if (newsh == NULL) return NULL;
 
+    //更新之后的空闲字符串长度
     newsh->free = newlen - len;
     return newsh->buf;
 }
@@ -114,6 +126,7 @@ sds sdsMakeRoomFor(sds s, size_t addlen) {
 /* Reallocate the sds string so that it has no free space at the end. The
  * contained string remains not altered, but next concatenation operations
  * will require a reallocation. */
+//清楚未使用的字符
 sds sdsRemoveFreeSpace(sds s) {
     struct sdshdr *sh;
 
@@ -123,6 +136,7 @@ sds sdsRemoveFreeSpace(sds s) {
     return sh->buf;
 }
 
+//该字符串真正分配的字符串长度，有效字符串长度+空闲字符串长度+1+hdr结构大小
 size_t sdsAllocSize(sds s) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
 
@@ -150,6 +164,9 @@ size_t sdsAllocSize(sds s) {
  * ... check for nread <= 0 and handle it ...
  * sdsIncrLen(s, nhread);
  */
+//增长有效的字符串长度，增长incr，这段字符被标记为已使用，不进行重新分配
+//一般配合sdsMakeRoomFor使用，首先调用sdsMakeRoomFor函数之后，然后将这段
+//新分配的字符串填充字符（添加在free的起始处），添加之后改变有效的字符串长度
 void sdsIncrLen(sds s, int incr) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
 
@@ -162,23 +179,41 @@ void sdsIncrLen(sds s, int incr) {
 
 /* Grow the sds to have the specified length. Bytes that were not part of
  * the original length of the sds will be set to zero. */
+//扩展保持字符串至少为len字节，并且新扩展的字符串的前len字符中的空闲字符
+//清零
+//这个函数等价于:
+//oldLen = sdslen(s);
+//sdsMakeRoomFor(s , len);
+//memset(s + oldLen , 0 , len - oldLen);
+//sdsIncrLen(s , len - oldLen);
 sds sdsgrowzero(sds s, size_t len) {
     struct sdshdr *sh = (void*)(s-(sizeof(struct sdshdr)));
     size_t totlen, curlen = sh->len;
 
+    //如果当前的字符串有效长度大于len，不需要分配，因为只针对未使用的字符串
+    //清零
     if (len <= curlen) return s;
+    //分配字符串保持至少为len：有效的字符串长度不变
     s = sdsMakeRoomFor(s,len-curlen);
     if (s == NULL) return NULL;
 
     /* Make sure added region doesn't contain garbage */
     sh = (void*)(s-(sizeof(struct sdshdr)));
+    //在有效的字符串长度之和的字节清零，长度不超过len
     memset(s+curlen,0,(len-curlen+1)); /* also set trailing \0 byte */
     totlen = sh->len+sh->free;
+    //有效长度增长
     sh->len = len;
     sh->free = totlen-sh->len;
     return s;
 }
 
+//追加字段内存到sds
+//等价于:
+//oldLen = sdslen(s);
+//sdsMakeRoomFor(s , len);
+//memcpy(s + oldLen , t , len);
+//sdsIncrLen(s , len - oldLen);
 sds sdscatlen(sds s, const void *t, size_t len) {
     struct sdshdr *sh;
     size_t curlen = sdslen(s);
@@ -193,24 +228,30 @@ sds sdscatlen(sds s, const void *t, size_t len) {
     return s;
 }
 
+//追加字符串
 sds sdscat(sds s, const char *t) {
     return sdscatlen(s, t, strlen(t));
 }
 
+//追加sds字符串
 sds sdscatsds(sds s, const sds t) {
     return sdscatlen(s, t, sdslen(t));
 }
 
+//拷贝一段字符到sds中，覆盖原有的内容
 sds sdscpylen(sds s, const char *t, size_t len) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
     size_t totlen = sh->free+sh->len;
 
+    //如果长度小于当前长度，需要重新分配空间
     if (totlen < len) {
+        //增长空间以满足长度len，所以只需要分配增量的长度
         s = sdsMakeRoomFor(s,len-sh->len);
         if (s == NULL) return NULL;
         sh = (void*) (s-(sizeof(struct sdshdr)));
         totlen = sh->free+sh->len;
     }
+    //直接覆盖
     memcpy(s, t, len);
     s[len] = '\0';
     sh->len = len;
@@ -218,15 +259,20 @@ sds sdscpylen(sds s, const char *t, size_t len) {
     return s;
 }
 
+//拷贝C字符串
 sds sdscpy(sds s, const char *t) {
     return sdscpylen(s, t, strlen(t));
 }
 
+//不定参数的字符串的追加
 sds sdscatvprintf(sds s, const char *fmt, va_list ap) {
     va_list cpy;
     char *buf, *t;
     size_t buflen = 16;
 
+    //这个比较有意思
+    //首先从16开始，分配一段字符串，然后将这些不定参数输入到这段字符串中
+    //如果这个大小的字符串不能容纳所有的输入，则增大一倍再试，直到可以为之
     while(1) {
         buf = zmalloc(buflen);
         if (buf == NULL) return NULL;
@@ -240,11 +286,13 @@ sds sdscatvprintf(sds s, const char *fmt, va_list ap) {
         }
         break;
     }
+    //追加在当前的s后面
     t = sdscat(s, buf);
     zfree(buf);
     return t;
 }
 
+//直接不定参数的输入
 sds sdscatprintf(sds s, const char *fmt, ...) {
     va_list ap;
     char *t;
@@ -254,6 +302,10 @@ sds sdscatprintf(sds s, const char *fmt, ...) {
     return t;
 }
 
+//根据cset修建字符串s，只保留s中间部分，头尾中包含在cset中的字符全部修剪掉
+//并且根据中间的这段子字符串重新构造s
+//eg.s:"hello world" , cset:"hed"
+//调用该函数之后s中的字符串变成："llo worl"
 sds sdstrim(sds s, const char *cset) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
     char *start, *end, *sp, *ep;
@@ -261,9 +313,12 @@ sds sdstrim(sds s, const char *cset) {
 
     sp = start = s;
     ep = end = s+sdslen(s)-1;
+    //从前向后，找到第一个不包含任何在cset中的字符
     while(sp <= end && strchr(cset, *sp)) sp++;
+    //从后向前，找到第一个不包含任何在cset中的字符
     while(ep > start && strchr(cset, *ep)) ep--;
     len = (sp > ep) ? 0 : ((ep-sp)+1);
+    //在同一内存段操作，不能够使用memcpy
     if (sh->buf != sp) memmove(sh->buf, sp, len);
     sh->buf[len] = '\0';
     sh->free = sh->free+(sh->len-len);
@@ -271,23 +326,36 @@ sds sdstrim(sds s, const char *cset) {
     return s;
 }
 
+//得到该字符串的切片[start , end)
+//start和end可以是整数或者负数
+//例如长度为10的字符串，可以是[0 , 10]或者[-10 , -1]
+//切片直接覆盖源字符串，并且是从start开始，但是不包括end
 sds sdsrange(sds s, int start, int end) {
     struct sdshdr *sh = (void*) (s-(sizeof(struct sdshdr)));
     size_t newlen, len = sdslen(s);
 
     if (len == 0) return s;
+    //如果起始值小于0，将它加上len，如果仍小于0，表示从0开始
+    //例如len=10，-10等价于0
     if (start < 0) {
         start = len+start;
         if (start < 0) start = 0;
     }
+    //如果结束值也小于0，同样加上len，同上
+    //例如len=10 ， -1等价于9，-100等价于0
+    //所以len=10 , [-10 , -1)等价于[0 , 9)
     if (end < 0) {
         end = len+end;
         if (end < 0) end = 0;
     }
+    //切片的字符串长度，[3 , 1]等价于[0 , 0]
     newlen = (start > end) ? 0 : (end-start)+1;
+    //如果有效的切片长度不为0
     if (newlen != 0) {
+        //如果起始值大于长度，例如len=10,[100 , 200]是无效的
         if (start >= (signed)len) {
             newlen = 0;
+            //如果结束位置大于字符串长度，截止到len
         } else if (end >= (signed)len) {
             end = len-1;
             newlen = (start > end) ? 0 : (end-start)+1;
@@ -295,25 +363,31 @@ sds sdsrange(sds s, int start, int end) {
     } else {
         start = 0;
     }
+    //如果是有效的切片长度，需要移动字符串，不适用memcpy
     if (start && newlen) memmove(sh->buf, sh->buf+start, newlen);
+    //对于无效的切片范围，源字符串将被切为空字符串
+    //这发生在从0开始切片长度为0，也就是生成空字符串
     sh->buf[newlen] = 0;
     sh->free = sh->free+(sh->len-newlen);
     sh->len = newlen;
     return s;
 }
 
+//将字符串中所有的字符编程小写字母
 void sdstolower(sds s) {
     int len = sdslen(s), j;
 
     for (j = 0; j < len; j++) s[j] = tolower(s[j]);
 }
 
+//改变成大写字母
 void sdstoupper(sds s) {
     int len = sdslen(s), j;
 
     for (j = 0; j < len; j++) s[j] = toupper(s[j]);
 }
 
+//比较两个字符串
 int sdscmp(const sds s1, const sds s2) {
     size_t l1, l2, minlen;
     int cmp;
@@ -321,7 +395,9 @@ int sdscmp(const sds s1, const sds s2) {
     l1 = sdslen(s1);
     l2 = sdslen(s2);
     minlen = (l1 < l2) ? l1 : l2;
+    //以更小的字符串作为标准，字典比较
     cmp = memcmp(s1,s2,minlen);
+    //如果前minlen字符全部相同，长度大的字符串大
     if (cmp == 0) return l1-l2;
     return cmp;
 }
@@ -342,39 +418,53 @@ int sdscmp(const sds s1, const sds s2) {
  * requires length arguments. sdssplit() is just the
  * same function but for zero-terminated strings.
  */
+//将一段长度为len的字符串s，按照长度为seplen的字符串sep作为分隔符，
+//将源字符串分割成多个sds字符串，这些sds装在一个数组中返回,count返回数组长度
+//时间复杂度为len*seplen
 sds *sdssplitlen(const char *s, int len, const char *sep, int seplen, int *count) {
     int elements = 0, slots = 5, start = 0, j;
     sds *tokens;
 
     if (seplen < 1 || len < 0) return NULL;
 
+    //初始化分配5个sds字符串
     tokens = zmalloc(sizeof(sds)*slots);
     if (tokens == NULL) return NULL;
 
     if (len == 0) {
         *count = 0;
+        //即使未进行划分，也返回字符串数组
         return tokens;
     }
+    //遍历字符串，从开始到倒数第seplen个字符
     for (j = 0; j < (len-(seplen-1)); j++) {
         /* make sure there is room for the next element and the final one */
         if (slots < elements+2) {
+            //当前字符串数组不够的情况下追加分配
             sds *newtokens;
 
+            //增加一倍，5、10、20
             slots *= 2;
             newtokens = zrealloc(tokens,sizeof(sds)*slots);
+            //这里的cleanup是清楚之前保存在tokens中的字符串,
+            //分配失败的时候才cleanup，成功会在realloc中free
             if (newtokens == NULL) goto cleanup;
             tokens = newtokens;
         }
         /* search the separator */
+        //如果满足匹配分隔符，将字符串进行划分
         if ((seplen == 1 && *(s+j) == sep[0]) || (memcmp(s+j,sep,seplen) == 0)) {
+            //填充数组，初始化字符串
             tokens[elements] = sdsnewlen(s+start,j-start);
             if (tokens[elements] == NULL) goto cleanup;
             elements++;
+            //下一个匹配起点
             start = j+seplen;
             j = j+seplen-1; /* skip the separator */
         }
     }
     /* Add the final element. We are sure there is room in the tokens array. */
+    //对最后的一个字符串进行匹配，添加到数组中
     tokens[elements] = sdsnewlen(s+start,len-start);
     if (tokens[elements] == NULL) goto cleanup;
     elements++;
@@ -391,6 +481,7 @@ cleanup:
     }
 }
 
+//释放之前的分配的sds，根据count作为有效的sds数目，两个函数配对使用
 void sdsfreesplitres(sds *tokens, int count) {
     if (!tokens) return;
     while(count--)
@@ -398,11 +489,13 @@ void sdsfreesplitres(sds *tokens, int count) {
     zfree(tokens);
 }
 
+//将long long值转换成字符串
 sds sdsfromlonglong(long long value) {
     char buf[32], *p;
     unsigned long long v;
 
     v = (value < 0) ? -value : value;
+    //从后向前添加数字，这里最大的数字长度为32位
     p = buf+31; /* point to the last character */
     do {
         *p-- = '0'+(v%10);
@@ -413,6 +506,8 @@ sds sdsfromlonglong(long long value) {
     return sdsnewlen(p,32-(p-buf));
 }
 
+//对p字符串中的字符进行追加追加的字符被包裹在""中
+//区别在于解析转义字符
 sds sdscatrepr(sds s, const char *p, size_t len) {
     s = sdscatlen(s,"\"",1);
     while(len--) {
@@ -430,6 +525,7 @@ sds sdscatrepr(sds s, const char *p, size_t len) {
             if (isprint(*p))
                 s = sdscatprintf(s,"%c",*p);
             else
+                //不可打印字符以16进制表示
                 s = sdscatprintf(s,"\\x%02x",(unsigned char)*p);
             break;
         }
@@ -440,6 +536,7 @@ sds sdscatrepr(sds s, const char *p, size_t len) {
 
 /* Helper function for sdssplitargs() that returns non zero if 'c'
  * is a valid hex digit. */
+//大写字母、小写字母、数字
 int is_hex_digit(char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
            (c >= 'A' && c <= 'F');
@@ -447,6 +544,7 @@ int is_hex_digit(char c) {
 
 /* Helper function for sdssplitargs() that converts an hex digit into an
  * integer from 0 to 15 */
+//16进制的数转换成对应的10进制数
 int hex_digit_to_int(char c) {
     switch(c) {
     case '0': return 0;
@@ -607,6 +705,8 @@ err:
  *
  * The function returns the sds string pointer, that is always the same
  * as the input pointer since no resize is needed. */
+//翻译字符串，将s中，所有与from相同的字符转换成对应的to中的字符
+//这需要保证to的长度要大于等于from的长度
 sds sdsmapchars(sds s, const char *from, const char *to, size_t setlen) {
     size_t j, i, l = sdslen(s);
 
@@ -621,12 +721,15 @@ sds sdsmapchars(sds s, const char *from, const char *to, size_t setlen) {
     return s;
 }
 
+#define SDS_TEST_MAIN
 #ifdef SDS_TEST_MAIN
 #include <stdio.h>
 #include "testhelp.h"
 
 int main(void) {
     {
+        char *foo = "foo";
+        printf("foo length : %d\n" , strlen(foo));
         struct sdshdr *sh;
         sds x = sdsnew("foo"), y;
 
