@@ -55,7 +55,10 @@
  * Note that even when dict_can_resize is set to 0, not all resizes are
  * prevented: an hash table is still allowed to grow if the ratio between
  * the number of elements and the buckets > dict_force_resize_ratio. */
+//标志是否可以调整索引表的大小，当元素较多的时候增大可以增快查找速度
+//当元素较少的时候，减少节约内存
 static int dict_can_resize = 1;
+//即使上面的标志为0，当元素个数/桶的数目大于该值的时候，还是会增大索引表
 static unsigned int dict_force_resize_ratio = 5;
 
 /* -------------------------- private prototypes ---------------------------- */
@@ -106,6 +109,7 @@ uint32_t dictGetHashFunctionSeed(void) {
  * 2. It will not produce the same results on little-endian and big-endian
  *    machines.
  */
+//字符串或者一段二进制值得哈希函数
 unsigned int dictGenHashFunction(const void *key, int len) {
     /* 'm' and 'r' are mixing constants generated offline.
      They're not really 'magic', they just happen to work well.  */
@@ -150,6 +154,7 @@ unsigned int dictGenHashFunction(const void *key, int len) {
 }
 
 /* And a case insensitive hash function (based on djb hash) */
+//字符串的哈希函数
 unsigned int dictGenCaseHashFunction(const unsigned char *buf, int len) {
     unsigned int hash = (unsigned int)dict_hash_function_seed;
 
@@ -171,6 +176,8 @@ static void _dictReset(dictht *ht)
 }
 
 /* Create a new hash table */
+//闯进一个字典，包括两个哈希表 
+//需要的参数是这个字典的类型回调函数和私有数据
 dict *dictCreate(dictType *type,
         void *privDataPtr)
 {
@@ -181,6 +188,7 @@ dict *dictCreate(dictType *type,
 }
 
 /* Initialize the hash table */
+//全部进行初始化，不预先分配任何bucket
 int _dictInit(dict *d, dictType *type,
         void *privDataPtr)
 {
@@ -199,7 +207,10 @@ int dictResize(dict *d)
 {
     int minimal;
 
+    //在未设置resize标记和rehash进行中的字典不能进行扩展
     if (!dict_can_resize || dictIsRehashing(d)) return DICT_ERR;
+    //扩展之后的bucket数目将大于当前哈希表中的entry的总数，这样可以使USED/BUCKETS的
+    //比率小于1，尽量达到O(1)查询的效率
     minimal = d->ht[0].used;
     if (minimal < DICT_HT_INITIAL_SIZE)
         minimal = DICT_HT_INITIAL_SIZE;
@@ -207,17 +218,21 @@ int dictResize(dict *d)
 }
 
 /* Expand or create the hash table */
+//该函数会在真正创建哈希表或者扩展哈希表的时候被调用
 int dictExpand(dict *d, unsigned long size)
 {
     dictht n; /* the new hash table */
+    //新的哈希表的bucket数目是大于当前used entry的数目的最小的2的指数
     unsigned long realsize = _dictNextPower(size);
 
     /* the size is invalid if it is smaller than the number of
      * elements already inside the hash table */
+    //保证该字典未进行rehash，并且保证USED/BUCKETS的比率小于1
     if (dictIsRehashing(d) || d->ht[0].used > size)
         return DICT_ERR;
 
     /* Allocate the new hash table and initialize all pointers to NULL */
+    //分配并初始化一个新的哈希表
     n.size = realsize;
     n.sizemask = realsize-1;
     n.table = zcalloc(realsize*sizeof(dictEntry*));
@@ -225,12 +240,16 @@ int dictExpand(dict *d, unsigned long size)
 
     /* Is this the first initialization? If so it's not really a rehashing
      * we just set the first hash table so that it can accept keys. */
+    //既然不是在rehash状态中，那么当前使用的哈希表应该是ht[0]，如果它为NULL
+    //说明这是在第一次分配该哈希表，所以将它保存在ht[0]中
     if (d->ht[0].table == NULL) {
         d->ht[0] = n;
         return DICT_OK;
     }
 
     /* Prepare a second hash table for incremental rehashing */
+    //否则将新分配的哈希表保存在ht[1]中，因为不在rehash，所以当前ht[1]为空
+    //并且标记rehash标志，在接下来的哈希表操作中会进行rehash操作
     d->ht[1] = n;
     d->rehashidx = 0;
     return DICT_OK;
@@ -240,6 +259,8 @@ int dictExpand(dict *d, unsigned long size)
  * keys to move from the old to the new hash table, otherwise 0 is returned.
  * Note that a rehashing step consists in moving a bucket (that may have more
  * thank one key as we use chaining) from the old to the new hash table. */
+//执行一次rehash操作，一般在检查到该字典的rehash标记被设置之后调用该函数
+//这里的参数n表示至少执行多少bucket的移动(reahash)，每次移动从rehashidx开始
 int dictRehash(dict *d, int n) {
     if (!dictIsRehashing(d)) return 0;
 
@@ -247,8 +268,12 @@ int dictRehash(dict *d, int n) {
         dictEntry *de, *nextde;
 
         /* Check if we already rehashed the whole table... */
+        //如果已经全部移动了，说明这一次rehash操作执行完成了
+        //释放ht[0]，然后重新将移动之后的ht[1]替换，这样保证不再rehash操作
+        //的时候都是使用ht[0]保存新添加的元素
         if (d->ht[0].used == 0) {
             zfree(d->ht[0].table);
+            //复制&重置
             d->ht[0] = d->ht[1];
             _dictReset(&d->ht[1]);
             d->rehashidx = -1;
@@ -257,10 +282,16 @@ int dictRehash(dict *d, int n) {
 
         /* Note that rehashidx can't overflow as we are sure there are more
          * elements because ht[0].used != 0 */
+        //在rehash过程中，rehashidx保存的是上一次移动的bucket的下标
+        //这样在下一次移动的时候从rehashidx开始
         assert(d->ht[0].size > (unsigned)d->rehashidx);
+        //跳过没有任何元素的bucket
         while(d->ht[0].table[d->rehashidx] == NULL) d->rehashidx++;
         de = d->ht[0].table[d->rehashidx];
         /* Move all the keys in this bucket from the old to the new hash HT */
+        //将旧哈希表ht[0]中的每一个bucket上的每一个entry都移动到ht[1]上
+        //因为同一个entry在两个表定位的bucket不同，所以需要重新hash，然后添加到bucket
+        //中entry链表的表头
         while(de) {
             unsigned int h;
 
@@ -287,6 +318,7 @@ long long timeInMilliseconds(void) {
 }
 
 /* Rehash for an amount of time between ms milliseconds and ms+1 milliseconds */
+//执行全部的rehash操作或者大于指定时间未完成
 int dictRehashMilliseconds(dict *d, int ms) {
     long long start = timeInMilliseconds();
     int rehashes = 0;
@@ -311,11 +343,15 @@ static void _dictRehashStep(dict *d) {
 }
 
 /* Add an element to the target hash table */
+//添加一个元素到字典中
+//注意，当前的字典只允许调用该API添加一个值为void*类型的key-value对
 int dictAdd(dict *d, void *key, void *val)
 {
+    //创建该key值对应的entry,然后设置其对应的值
     dictEntry *entry = dictAddRaw(d,key);
 
     if (!entry) return DICT_ERR;
+    //这里设置这个entry的value值
     dictSetVal(d, entry, val);
     return DICT_OK;
 }
@@ -335,6 +371,8 @@ int dictAdd(dict *d, void *key, void *val)
  * If key already exists NULL is returned.
  * If key was added, the hash entry is returned to be manipulated by the caller.
  */
+//这个函数也可以作为向外部提供的API使用，外部用户可以添加一个键值不为void*类型的值
+//它向字典中添加一个key值并且返回新创建的 entry对象，这个对象交给调用者操作
 dictEntry *dictAddRaw(dict *d, void *key)
 {
     int index;
@@ -345,17 +383,22 @@ dictEntry *dictAddRaw(dict *d, void *key)
 
     /* Get the index of the new element, or -1 if
      * the element already exists. */
+    //获取对应key的bucket索引
     if ((index = _dictKeyIndex(d, key)) == -1)
         return NULL;
 
     /* Allocate the memory and store the new entry */
+    //如果当前在执行rehash，说明需要将ht[0]上的entry转移到ht[1]上，并且尚未执行结束
+    //这时候就需要加入到ht[1]中，否则加入到ht[0]中
     ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
     entry = zmalloc(sizeof(*entry));
+    //加入到链表的表头
     entry->next = ht->table[index];
     ht->table[index] = entry;
     ht->used++;
 
     /* Set the hash entry fields. */
+    //最后设置该项的key
     dictSetKey(d, entry, key);
     return entry;
 }
@@ -364,12 +407,16 @@ dictEntry *dictAddRaw(dict *d, void *key)
  * Return 1 if the key was added from scratch, 0 if there was already an
  * element with such key and dictReplace() just performed a value update
  * operation. */
+//添加or替换，如果key不存在就执行添加操作，返回1
+//如果key存在更新value的值，返回0
 int dictReplace(dict *d, void *key, void *val)
 {
     dictEntry *entry, auxentry;
 
     /* Try to add the element. If the key
      * does not exists dictAdd will suceed. */
+    //只有在这个key存在的情况下，才会返回DICT_ERR，所以如果返回为DICT_OK，
+    //说明key不存在，并且添加成功.
     if (dictAdd(d, key, val) == DICT_OK)
         return 1;
     /* It already exists, get the entry */
@@ -380,6 +427,14 @@ int dictReplace(dict *d, void *key, void *val)
      * you want to increment (set), and then decrement (free), and not the
      * reverse. */
     auxentry = *entry;
+    //!!!这里有个疑问，这里说明必须首先设置然后再释放，但是执行了设置操作之后
+    //该entry的值为新的value（可能是覆盖），接下来的释放操作如果将它free了呢？
+    //也就是该哈希表的valDup函数为NULL，但是ValDestructor函数将free这个entry的value
+    //那么这就编程了一个空悬指针!!!
+    //有待加深理解。。。
+    //既然作者的注释说明这样的顺序是防止两个value为同一个对象并且使用了引用计数，
+    //如果这样可以简单的进行判断是否指向同一个对象，如果是直接返回
+    //不知道我这样理解是否违反了作者的意图~~~
     dictSetVal(d, entry, val);
     dictFreeVal(d, &auxentry);
     return 0;
@@ -391,6 +446,7 @@ int dictReplace(dict *d, void *key, void *val)
  * existing key is returned.)
  *
  * See dictAddRaw() for more information. */
+//仅仅是添加一个key对应的entry，如果不存在创建一个新的entry
 dictEntry *dictReplaceRaw(dict *d, void *key) {
     dictEntry *entry = dictFind(d,key);
 
@@ -398,6 +454,8 @@ dictEntry *dictReplaceRaw(dict *d, void *key) {
 }
 
 /* Search and remove an element */
+//查找并移除一个元素，如果nofree参数为0说明不释放该entry的key和value
+//否则，执行析构操作，如果为0，仅仅从哈希表中移除该entry
 static int dictGenericDelete(dict *d, const void *key, int nofree)
 {
     unsigned int h, idx;
@@ -435,15 +493,19 @@ static int dictGenericDelete(dict *d, const void *key, int nofree)
     return DICT_ERR; /* not found */
 }
 
+//移除一个entry
 int dictDelete(dict *ht, const void *key) {
     return dictGenericDelete(ht,key,0);
 }
 
+//移除并且释放一个entry的内容
 int dictDeleteNoFree(dict *ht, const void *key) {
     return dictGenericDelete(ht,key,1);
 }
 
 /* Destroy an entire dictionary */
+//释放整个字典中的一个哈希表
+//重置该哈希表，但是不释放内存
 int _dictClear(dict *d, dictht *ht)
 {
     unsigned long i;
@@ -470,6 +532,7 @@ int _dictClear(dict *d, dictht *ht)
 }
 
 /* Clear & Release the hash table */
+//析构整个字典，释放内存，和create函数相对应
 void dictRelease(dict *d)
 {
     _dictClear(d,&d->ht[0]);
@@ -477,12 +540,14 @@ void dictRelease(dict *d)
     zfree(d);
 }
 
+//根据key的值得到对应的bucket链表中该key的entry
 dictEntry *dictFind(dict *d, const void *key)
 {
     dictEntry *he;
     unsigned int h, idx, table;
 
     if (d->ht[0].size == 0) return NULL; /* We don't have a table at all */
+    //该操作也会导致rehash操作
     if (dictIsRehashing(d)) _dictRehashStep(d);
     h = dictHashKey(d, key);
     for (table = 0; table <= 1; table++) {
@@ -493,11 +558,13 @@ dictEntry *dictFind(dict *d, const void *key)
                 return he;
             he = he->next;
         }
+        //同样，如果第一次结束之后发现没有在rehash，说明ht[1]为空，直接返回
         if (!dictIsRehashing(d)) return NULL;
     }
     return NULL;
 }
 
+//获取一个key对应的value
 void *dictFetchValue(dict *d, const void *key) {
     dictEntry *he;
 
@@ -505,6 +572,7 @@ void *dictFetchValue(dict *d, const void *key) {
     return he ? dictGetVal(he) : NULL;
 }
 
+//初始化一个迭代器，从第一项开始
 dictIterator *dictGetIterator(dict *d)
 {
     dictIterator *iter = zmalloc(sizeof(*iter));
@@ -518,6 +586,7 @@ dictIterator *dictGetIterator(dict *d)
     return iter;
 }
 
+//安全迭代器，字典的插入和删除操作不会影响迭代器
 dictIterator *dictGetSafeIterator(dict *d) {
     dictIterator *i = dictGetIterator(d);
 
@@ -525,20 +594,30 @@ dictIterator *dictGetSafeIterator(dict *d) {
     return i;
 }
 
+//下一个迭代项的entry，从上面的迭代器初始化可以看出
+//迭代器在初始化的时候是不指向任何entry的，需要执行next操作获entry的指针
 dictEntry *dictNext(dictIterator *iter)
 {
     while (1) {
+        //第一次next
         if (iter->entry == NULL) {
             dictht *ht = &iter->d->ht[iter->table];
+            //这里说明是一个安全的迭代器第一次next操作，增加字典中的计数
+            //之所以对着三项都进行判断，因为只有这样才能够唯一得标志该状态
             if (iter->safe && iter->index == -1 && iter->table == 0)
                 iter->d->iterators++;
             iter->index++;
+            //这里说明bucket的index已经超出当前的最大值了
             if (iter->index >= (signed) ht->size) {
+                //如果执行rehash，切换哈希表,这个指挥执行一次
+                //并且是对于是否安全的迭代器都会执行该操作
+                //那么安全迭代器的安全体现在哪里呢？！！！
                 if (dictIsRehashing(iter->d) && iter->table == 0) {
                     iter->table++;
                     iter->index = 0;
                     ht = &iter->d->ht[1];
                 } else {
+                    //没有rehash操作，说明已经到达了最后一个元素
                     break;
                 }
             }
@@ -549,6 +628,9 @@ dictEntry *dictNext(dictIterator *iter)
         if (iter->entry) {
             /* We need to save the 'next' here, the iterator user
              * may delete the entry we are returning. */
+            //这里在得到迭代器的entry之后会继续得到nextEntry，当值entry被删除
+            //但是如果这两个元素都被删除了呢？
+            //如何让迭代器感应到这种变化？
             iter->nextEntry = iter->entry->next;
             return iter->entry;
         }
@@ -556,6 +638,7 @@ dictEntry *dictNext(dictIterator *iter)
     return NULL;
 }
 
+//释放迭代器...
 void dictReleaseIterator(dictIterator *iter)
 {
     if (iter->safe && !(iter->index == -1 && iter->table == 0))
@@ -572,14 +655,17 @@ dictEntry *dictGetRandomKey(dict *d)
     int listlen, listele;
 
     if (dictSize(d) == 0) return NULL;
+    //该操作也会引起rehash，step by step...
     if (dictIsRehashing(d)) _dictRehashStep(d);
     if (dictIsRehashing(d)) {
+        //如果正在执行rehash，则将两个哈希表都考虑在随机的方位内，找到bucket链表
         do {
             h = random() % (d->ht[0].size+d->ht[1].size);
             he = (h >= d->ht[0].size) ? d->ht[1].table[h - d->ht[0].size] :
                                       d->ht[0].table[h];
         } while(he == NULL);
     } else {
+        //否则只从第一个哈希表中随机找到一个bucket
         do {
             h = random() & d->ht[0].sizemask;
             he = d->ht[0].table[h];
@@ -592,6 +678,8 @@ dictEntry *dictGetRandomKey(dict *d)
      * select a random index. */
     listlen = 0;
     orighe = he;
+    //首先得到这个链表的长度，然后再随机的走k步...
+    //这样最科学撒...
     while(he) {
         he = he->next;
         listlen++;
@@ -605,22 +693,28 @@ dictEntry *dictGetRandomKey(dict *d)
 /* ------------------------- private functions ------------------------------ */
 
 /* Expand the hash table if needed */
+//扩展字典，在检查到需要扩展的时候,这里包含了检测的过程
 static int _dictExpandIfNeeded(dict *d)
 {
     /* Incremental rehashing already in progress. Return. */
+    //如果正在执行rehash操作，直接返回
     if (dictIsRehashing(d)) return DICT_OK;
 
     /* If the hash table is empty expand it to the initial size. */
+    //第一次添加元素，执行扩展
     if (d->ht[0].size == 0) return dictExpand(d, DICT_HT_INITIAL_SIZE);
 
     /* If we reached the 1:1 ratio, and we are allowed to resize the hash
      * table (global setting) or we should avoid it but the ratio between
      * elements/buckets is over the "safe" threshold, we resize doubling
      * the number of buckets. */
+    //如果设置了resize标记，那么在USED/BUCKET的比率大于1的时候就会执行扩展
+    //如果没有设置该标志，在该比率超过dict_force_resize_ratio的时候再进行扩展
     if (d->ht[0].used >= d->ht[0].size &&
         (dict_can_resize ||
          d->ht[0].used/d->ht[0].size > dict_force_resize_ratio))
     {
+        //扩展的结果是bucket的数目增大一倍
         return dictExpand(d, ((d->ht[0].size > d->ht[0].used) ?
                                     d->ht[0].size : d->ht[0].used)*2);
     }
@@ -628,6 +722,7 @@ static int _dictExpandIfNeeded(dict *d)
 }
 
 /* Our hash table capability is a power of two */
+//以2为底的对数
 static unsigned long _dictNextPower(unsigned long size)
 {
     unsigned long i = DICT_HT_INITIAL_SIZE;
@@ -652,19 +747,26 @@ static int _dictKeyIndex(dict *d, const void *key)
     dictEntry *he;
 
     /* Expand the hash table if needed */
+    //在添加之前检查是否需要扩展
     if (_dictExpandIfNeeded(d) == DICT_ERR)
         return -1;
     /* Compute the key hash value */
+    //得到对应的bucket索引值
     h = dictHashKey(d, key);
+    //这里之所以需要遍历两个哈希表，是因为有rehash的需求
+    //必须保证在字典中key是唯一的，并且是不变的
     for (table = 0; table <= 1; table++) {
         idx = h & d->ht[table].sizemask;
         /* Search if this slot does not already contain the given key */
         he = d->ht[table].table[idx];
+        //如果这个bucket中已经存在相同的key，直接返回错误
         while(he) {
             if (dictCompareKeys(d, key, he->key))
                 return -1;
             he = he->next;
         }
+        //如果当前未执行rehash操作（-1）,说明所有的key-value都存放在ht[0]中
+        //所以这里避免了第二次的遍历
         if (!dictIsRehashing(d)) break;
     }
     return idx;
