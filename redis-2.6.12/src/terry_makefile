@@ -1,0 +1,10 @@
+flags = -g -Wall -std=c99
+
+intset : intset.h intset.c zmalloc.h endianconv.h config.h
+	gcc -o test_intset intset.c zmalloc.c ${flags} -DINTSET_TEST_MAIN
+
+ziplist : ziplist.h ziplist.c zmalloc.h util.h endianconv.h config.h
+	gcc -o ziplist ziplist.c zmalloc.c util.c endianconv.c adlist.c sds.c ${flags} -DZIPLIST_TEST_MAIN
+
+clean :
+	rm test_intset
