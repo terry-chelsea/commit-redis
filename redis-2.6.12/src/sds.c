@@ -721,7 +721,6 @@ sds sdsmapchars(sds s, const char *from, const char *to, size_t setlen) {
     return s;
 }
 
-#define SDS_TEST_MAIN
 #ifdef SDS_TEST_MAIN
 #include <stdio.h>
 #include "testhelp.h"
@@ -729,7 +728,7 @@ sds sdsmapchars(sds s, const char *from, const char *to, size_t setlen) {
 int main(void) {
     {
         char *foo = "foo";
-        printf("foo length : %d\n" , strlen(foo));
+        printf("foo length : %ld\n" , strlen(foo));
         struct sdshdr *sh;
         sds x = sdsnew("foo"), y;
 
